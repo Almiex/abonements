@@ -160,7 +160,6 @@ if only_debt:
     flt = flt[flt["Долг_по_оплате"] > 0]
 flt = flt.sort_values(sort_by, ascending=sort_asc)
 
-top_n = st.sidebar.slider("Топ-N услуг на графиках", min_value=5, max_value=max(5, len(flt)), value=min(10, len(flt)))
 
 # ------------------------------------------------------------------
 # Заголовок и KPI
@@ -215,20 +214,20 @@ st.divider()
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader(f"Оплачено vs Оказано (топ-{top_n})")
-    top = flt.nlargest(top_n, "Оказано_на_сумму")
+    st.subheader("Оплачено vs Оказано (все услуги)")
+    top = flt.sort_values("Оказано_на_сумму", ascending=False)
     long = top.melt(id_vars="Абонемент", value_vars=["Оплачено", "Оказано_на_сумму"],
                     var_name="Показатель", value_name="Сумма")
     long["Показатель"] = long["Показатель"].map({"Оплачено": "Оплачено", "Оказано_на_сумму": "Оказано"})
     fig1 = px.bar(long, x="Сумма", y="Абонемент", color="Показатель", barmode="group", orientation="h",
                   color_discrete_map={"Оплачено": "#2E86AB", "Оказано": "#F24236"},
                   labels={"Сумма": "Сумма, ₽", "Абонемент": ""})
-    fig1.update_layout(height=max(350, top_n * 40), yaxis={"categoryorder": "total ascending"})
+    fig1.update_layout(height=max(350, len(top) * 40), yaxis={"categoryorder": "total ascending"})
     st.plotly_chart(fig1, use_container_width=True)
 
 with col_right:
-    st.subheader("% потребления по услугам (топ по оказанным)")
-    top_c = flt[flt["Стоимость_абонемента_сумма"] > 0].nlargest(top_n, "Оказано_на_сумму")
+    st.subheader("% потребления по услугам")
+    top_c = flt[flt["Стоимость_абонемента_сумма"] > 0]
     if not top_c.empty:
         fig2 = px.bar(top_c.sort_values("Процент_потребления"), x="Процент_потребления", y="Абонемент",
                       orientation="h", color="Процент_потребления", color_continuous_scale="RdYlGn_r",
@@ -236,21 +235,18 @@ with col_right:
                       labels={"Процент_потребления": "% потребления", "Абонемент": ""},
                       text="Процент_потребления")
         fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
-        fig2.update_layout(height=max(350, top_n * 40), coloraxis_showscale=False)
+        fig2.update_layout(height=max(350, len(top_c) * 40), coloraxis_showscale=False)
         st.plotly_chart(fig2, use_container_width=True)
     else:
         st.info("Нет данных для расчёта процента потребления.")
 
 st.subheader("Структура оплаченных средств по услугам")
-pie_src = flt[flt["Оплачено"] > 0].nlargest(top_n, "Оплачено")
+pie_src = flt[flt["Оплачено"] > 0]
 if not pie_src.empty:
     fig3 = px.pie(pie_src, values="Оплачено", names="Абонемент", hole=0.45,
                   labels={"Абонемент": "Услуга", "Оплачено": "Оплачено, ₽"})
     fig3.update_traces(textinfo="percent+label")
     fig3.update_layout(height=520)
-    rest = total_paid - pie_src["Оплачено"].sum()
-    if rest > 0:
-        st.caption(f"Остальные услуги (вне топ-{top_n}): {fmt_rub.format(rest).replace(',', ' ')}")
     st.plotly_chart(fig3, use_container_width=True)
 else:
     st.info("Нет данных об оплаченных средствах.")
