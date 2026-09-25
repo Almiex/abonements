@@ -184,7 +184,44 @@ c6.metric("Долг по оплате", fmt_rub.format(total_cost - total_paid).
 c7.metric("Средний % потребления", f"{(total_done / total_cost * 100 if total_cost else 0):.1f}%",
           help="Оказано на сумму / Стоимость проданных абонементов × 100")
 
+
 st.divider()
+
+# ------------------------------------------------------------------
+# Главный график: популярность абонементов
+# ------------------------------------------------------------------
+st.subheader("Популярность абонементов: количество проданных и выручка")
+
+pop_cnt = flt.sort_values("Количество", ascending=True)
+pop_rev = flt[flt["Оплачено"] > 0].sort_values("Оплачено", ascending=True)
+
+p1, p2 = st.columns(2)
+with p1:
+    fig_pop1 = px.bar(
+        pop_cnt, x="Количество", y="Абонемент", orientation="h",
+        color="Количество", color_continuous_scale="Blues",
+        labels={"Количество": "Продано абонементов, шт.", "Абонемент": ""},
+        text="Количество",
+    )
+    fig_pop1.update_traces(textposition="outside", cliponaxis=False)
+    fig_pop1.update_layout(height=max(400, len(pop_cnt) * 40), coloraxis_showscale=False,
+                           yaxis={"categoryorder": "total ascending"})
+    st.plotly_chart(fig_pop1, use_container_width=True)
+
+with p2:
+    if not pop_rev.empty:
+        fig_pop2 = px.bar(
+            pop_rev, x="Оплачено", y="Абонемент", orientation="h",
+            color="Оплачено", color_continuous_scale="Greens",
+            labels={"Оплачено": "Выручка (оплачено), ₽", "Абонемент": ""},
+            text="Оплачено",
+        )
+        fig_pop2.update_traces(texttemplate="%{text:,.0f} ₽", textposition="outside", cliponaxis=False)
+        fig_pop2.update_layout(height=max(400, len(pop_rev) * 40), coloraxis_showscale=False,
+                               yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig_pop2, use_container_width=True)
+    else:
+        st.info("Нет данных об оплатах.")
 
 # ------------------------------------------------------------------
 # Динамика по месяцам
