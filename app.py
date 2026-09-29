@@ -102,6 +102,65 @@ def aggregate_monthly(df: pd.DataFrame) -> pd.DataFrame:
         Оказано_на_сумму=("Услуг оказано на сумму", "sum"),
     ).reset_index().sort_values("Месяц создания")
 
+def _extract_period(file_bytes: bytes) -> tuple:
+    """Период из шапки отчёта (строки вида 'С: 01.01.2026' / 'ПО: 01.09.2026')."""
+    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, header=None)
+    d_from = d_to = None
+    for i in range(min(12, len(raw))):
+        for v in raw.iloc[i].tolist():
+            s = str(v).strip()
+            if s.upper().startswith("С:"):
+                d_from = s.split(":", 1)[1].strip()
+            elif s.upper().startswith(("ПО:", "ПО ")) or s.startswith("По:"):
+                d_to = s.split(":", 1)[1].strip() if ":" in s else s[2:].strip()
+    return d_from, d_to
+
+
+SERVICE_CATEGORIES = ["Абонементы", "Приёмы", "Анализы", "Прочие разовые услуги"]
+
+
+def _classify_service(name: str, spec: str) -> str:
+    name_u, spec_u = str(name).upper(), str(spec).upper()
+    if spec_u == "АБОНЕМЕНТЫ" or "АБОНЕМЕНТ" in name_u:
+        return "Абонементы"
+    if spec_u == "ВНЕШНЯЯ ЛАБОРАТОРИЯ":
+        return "Анализы"
+    if name_u.strip().startswith("ПРИЕМ"):
+        return "Приёмы"
+    return "Прочие разовые услуги"
+
+
+@st.cache_data(show_spinner="Читаю отчёт по услугам…")
+def parse_services(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    """Читает отчёт «Количество выполненных услуг на сумму по убыванию»."""
+    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, header=None)
+    header_idx = None
+    for i in range(min(20, len(raw))):
+        if str(raw.iloc[i, 0]).strip() == "USLCODE":
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("Не найдена строка заголовка ('USLCODE') — это не отчёт по услугам.")
+
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, skiprows=header_idx)
+    df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
+    for c in ["Кол-во", "Актуальная цена", "кол-во * цена"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    df = df[df["Услуга"].notna()].copy()
+    df["Категория"] = [_classify_service(n, s) for n, s in zip(df["Услуга"], df["Специалитет"])]
+    return df
+
+
+def aggregate_service_categories(srv: pd.DataFrame) -> pd.DataFrame:
+    agg = srv.groupby("Категория").agg(Количество=("Кол-во", "sum"), Сумма=("кол-во * цена", "sum"))
+    agg = agg.reindex(SERVICE_CATEGORIES).fillna(0).reset_index()
+    total_cnt = agg["Количество"].sum()
+    total_sum = agg["Сумма"].sum()
+    agg["Доля_кол_%"] = (agg["Количество"] / total_cnt * 100).round(2) if total_cnt else 0
+    agg["Доля_суммы_%"] = (agg["Сумма"] / total_sum * 100).round(2) if total_sum else 0
+    return agg
+
+
 
 # ------------------------------------------------------------------
 # Загрузка файла
@@ -113,9 +172,18 @@ uploaded = st.sidebar.file_uploader(
     help="Персональные данные удаляются автоматически при чтении файла.",
 )
 
+uploaded_services = st.sidebar.file_uploader(
+    "Отчёт по всем услугам (.xlsx) — опционально",
+    type=["xlsx", "xls"],
+    help="Отчёт «Количество выполненных услуг на сумму по убыванию». "
+         "Нужен для сравнения доли абонементов и разовых услуг.",
+)
+
 if uploaded is None:
     st.title("📊 Дашборд по услугам-абонементам")
-    st.info("👈 Загрузите в боковой панели отчёт «Список абонементов по дате» (Excel). Даты в отчёте могут быть любыми — дашборд построится автоматически.")
+    st.info("👈 Загрузите в боковой панели отчёт «Список абонементов по дате» (Excel). "
+            "Даты в отчёте могут быть любыми — дашборд построится автоматически. "
+            "Для сравнения с разовыми услугами загрузите также отчёт по всем услугам.")
     st.stop()
 
 try:
@@ -184,6 +252,95 @@ c6.metric("Долг по оплате", fmt_rub.format(total_cost - total_paid).
 c7.metric("Средний % потребления", f"{(total_done / total_cost * 100 if total_cost else 0):.1f}%",
           help="Оказано на сумму / Стоимость проданных абонементов × 100")
 
+
+
+# ------------------------------------------------------------------
+# Сравнение: абонементы vs разовые услуги
+# ------------------------------------------------------------------
+if uploaded_services is not None:
+    try:
+        srv_df = parse_services(uploaded_services.getvalue(), uploaded_services.name)
+        srv_period = _extract_period(uploaded_services.getvalue())
+        srv_agg = aggregate_service_categories(srv_df)
+
+        st.divider()
+        st.subheader("🏥 Абонементы vs разовые услуги")
+        st.caption(
+            f"Отчёт по услугам: **{uploaded_services.name}** · период: "
+            f"**{srv_period[0] or 'н/д'} — {srv_period[1] or 'н/д'}** · "
+            f"всего оказано **{int(srv_df['Кол-во'].sum()):,} услуг на {srv_df['кол-во * цена'].sum():,.0f} ₽**".replace(",", " ")
+        )
+
+        st.warning(
+            "⚠️ Периоды двух отчётов могут не совпадать: абонементный отчёт — по датам **создания** "
+            "абонементов, отчёт по услугам — по датам **оказания**. Сравнение носит оценочный характер.",
+            icon=None,
+        )
+
+        # --- доля по количеству ---
+        fig_cnt = px.pie(
+            srv_agg[srv_agg["Количество"] > 0],
+            values="Количество", names="Категория", hole=0.45,
+            color="Категория",
+            color_discrete_map={
+                "Абонементы": "#7C4DBE", "Приёмы": "#2E86AB",
+                "Анализы": "#F6A21E", "Прочие разовые услуги": "#9AA5B1",
+            },
+            labels={"Количество": "Кол-во, шт."},
+        )
+        fig_cnt.update_traces(textinfo="percent+label", texttemplate="%{label}<br>%{percent:.1%}")
+        fig_cnt.update_layout(height=430, legend=dict(orientation="h", yanchor="bottom", y=-0.15))
+
+        # --- доля по выручке ---
+        abon_paid = float(flt["Оплачено"].sum())
+        oneoff_sum = float(srv_agg.loc[srv_agg["Категория"] != "Абонементы", "Сумма"].sum())
+        rev_df = pd.DataFrame({
+            "Источник": ["Абонементы (оплачено)", "Разовые услуги (оказано)"],
+            "Сумма": [abon_paid, oneoff_sum],
+        })
+        fig_rev = px.pie(
+            rev_df, values="Сумма", names="Источник", hole=0.45,
+            color="Источник",
+            color_discrete_map={"Абонементы (оплачено)": "#7C4DBE", "Разовые услуги (оказано)": "#2E86AB"},
+        )
+        fig_rev.update_traces(textinfo="percent+label", texttemplate="%{label}<br>%{percent:.1%}")
+        fig_rev.update_layout(height=430, legend=dict(orientation="h", yanchor="bottom", y=-0.15))
+
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            st.markdown("**Доля по количеству оказанных услуг**")
+            st.plotly_chart(fig_cnt, use_container_width=True)
+        with rc2:
+            st.markdown("**Доля в выручке**")
+            st.plotly_chart(fig_rev, use_container_width=True)
+
+        share_abon = abon_paid / (abon_paid + oneoff_sum) * 100 if (abon_paid + oneoff_sum) else 0
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Абонементы в выручке", f"{share_abon:.1f}%")
+        m2.metric("Абонементы, оплачено", fmt_rub.format(abon_paid).replace(",", " "))
+        m3.metric("Разовые услуги, оказано", fmt_rub.format(oneoff_sum).replace(",", " "))
+        m4.metric("Доля приёмов (по кол-ву)",
+                  f"{srv_agg.loc[srv_agg['Категория']=='Приёмы','Доля_кол_%'].iloc[0]:.1f}%")
+
+        with st.expander("Детализация по категориям услуг"):
+            show_srv = srv_agg.rename(columns={
+                "Категория": "Категория", "Количество": "Кол-во, шт.",
+                "Сумма": "Сумма, ₽", "Доля_кол_%": "Доля по кол-ву, %", "Доля_суммы_%": "Доля по сумме, %",
+            })
+            st.dataframe(
+                show_srv.style.format({
+                    "Кол-во, шт.": "{:,.0f}", "Сумма, ₽": "{:,.0f}",
+                    "Доля по кол-ву, %": "{:.2f}", "Доля по сумме, %": "{:.2f}",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "Категории: **Абонементы** — услуги со специалитетом «Абонементы» или с «абонемент» в названии; "
+                "**Приёмы** — наименования, начинающиеся со слова «Прием»; **Анализы** — внешняя лаборатория; "
+                "**Прочие разовые услуги** — всё остальное (манипуляции, УЗИ, рентген, медикаменты, операции)."
+            )
+    except Exception as e:
+        st.error(f"Не удалось прочитать отчёт по услугам: {e}")
 
 st.divider()
 
